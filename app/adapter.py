@@ -1,10 +1,12 @@
-#  Copyright 2022-2023 VMware, Inc.
+#  Copyright 2022 VMware, Inc.
 #  SPDX-License-Identifier: Apache-2.0
+import json
 import sys
 from typing import List
 
 import aria.ops.adapter_logging as logging
 from aria.ops.adapter_instance import AdapterInstance
+from aria.ops.data import Metric
 from aria.ops.definition.adapter_definition import AdapterDefinition
 from aria.ops.result import CollectResult
 from aria.ops.result import EndpointResult
@@ -12,6 +14,7 @@ from aria.ops.result import TestResult
 from aria.ops.timer import Timer
 from constants import ADAPTER_KIND
 from constants import ADAPTER_NAME
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -23,38 +26,51 @@ def get_adapter_definition() -> AdapterDefinition:
     validate, process, and display the data correctly.
     :return: AdapterDefinition
     """
-    with Timer(logger, "Get Adapter Definition"):
-        definition = AdapterDefinition(ADAPTER_KIND, ADAPTER_NAME)
+    try:
+        with Timer(logger, "Get Adapter Definition"):
+            definition = AdapterDefinition(ADAPTER_KIND, ADAPTER_NAME)
 
-        # TODO: Add parameters and credentials
+            # Define the user-editable parameters for this management pack. You typically need to
+            # define some kind of credential. In our case, we need a secret API key. Defining it this
+            # way assures that it will be stored securely in the internal secret store of VCF Ops.
+            credential = definition.define_credential_type("credential", "API Key")
+            credential.define_password_parameter("apiKey", "API Secret Key")
 
-        # The key 'container_memory_limit' is a special key read by the VMware Aria Operations
-        # collector to determine how much memory to allocate to the docker container running
-        # this adapter. It does not need to be read inside the adapter code. However, removing
-        # the definition from the object model will remove the ability to change the container
-        # memory limit during the adapter's configuration, and the VMware Aria Operations collector
-        # will give 1024 MB of memory to the container running the adapter instance.
-        definition.define_int_parameter(
-            "container_memory_limit",
-            label="Adapter Memory Limit (MB)",
-            description="Sets the maximum amount of memory VMware Aria Operations can "
-            "allocate to the container running this adapter instance.",
-            required=True,
-            advanced=True,
-            default=1024,
-        )
+            # In addition to the credentials, we need the user to enter the stock ticker they're interested in.
+            definition.define_string_parameter(
+                "ticker",
+                label="Ticker",
+                description="Stock ticker symbol",
+                required=True,
+            )
+            # The key 'container_memory_limit' is a special key that is read by the VMware Aria Operations collector to
+            # determine how much memory to allocate to the docker container running this adapter. It does not
+            # need to be read inside the adapter code.
+            definition.define_int_parameter(
+                "container_memory_limit",
+                label="Adapter Memory Limit (MB)",
+                description="Sets the maximum amount of memory VMware Aria Operations can "
+                "allocate to the container running this adapter instance.",
+                required=True,
+                advanced=True,
+                default=1024,
+            )
 
-        # TODO: Add object types, including identifiers, metrics, and properties
-
-        logger.debug(f"Returning adapter definition: {definition.to_json()}")
-        return definition
+            # Define the resource types. In our case, we create a Quote object with the bid and ask price.
+            quote = definition.define_object_type("quote", "Quote")
+            quote.define_metric("bid", "bid", None)
+            quote.define_metric("ask", "ask", None)
+            return definition
+    except Exception as e:
+        logger.error(e)
 
 
 def test(adapter_instance: AdapterInstance) -> TestResult:
     with Timer(logger, "Test"):
         result = TestResult()
         try:
-            # A typical test connection will generally consist of:
+            # Sample test connection code follows. Replace with your own test connection
+            # code. A typical test connection will generally consist of:
             # 1. Read identifier values from adapter_instance that are required to
             #    connect to the target(s)
             # 2. Connect to the target(s), and retrieve some sample data
@@ -62,9 +78,13 @@ def test(adapter_instance: AdapterInstance) -> TestResult:
             #    error occurs)
             # 4. If any of the above failed, return an error, otherwise pass.
 
-            # TODO: Add connection testing logic
-            pass  # TODO: Remove pass statement
-
+            # Read the 'ID' identifier in the adapter instance and use it for a
+            # connection test.
+            ticker = adapter_instance.get_identifier_value("ticker")
+            api_key = adapter_instance.get_credential_value("apiKey")
+            response = requests.get(f"https://api.finage.co.uk/last/stock/{ticker}?apikey={api_key}")
+            if response.status_code != 200:
+                result.with_error("Error connecting to market")
         except Exception as e:
             logger.error("Unexpected connection test error")
             logger.exception(e)
@@ -79,7 +99,8 @@ def collect(adapter_instance: AdapterInstance) -> CollectResult:
     with Timer(logger, "Collection"):
         result = CollectResult()
         try:
-            # A typical collection will generally consist of:
+            # Sample collection code follows. Replace this with your own collection
+            # code. A typical collection will generally consist of:
             # 1. Read identifier values from adapter_instance that are required to
             #    connect to the target(s)
             # 2. Connect to the target(s), and retrieve data
@@ -88,9 +109,22 @@ def collect(adapter_instance: AdapterInstance) -> CollectResult:
             #    error occurs)
             # 5. Return the CollectResult.
 
-            # TODO: Add collection logic
-            pass  # TODO: Remove pass statement
+            # Collect the API key and ticker symbol
+            ticker = adapter_instance.get_identifier_value("ticker")
+            api_key = adapter_instance.get_credential_value("apiKey")
 
+            # Call the market API
+            q = requests.get(f"https://api.finage.co.uk/last/stock/{ticker}?apikey={api_key}").json()
+
+            # Create an instance of the Quote object and give it the name of the ticker. The resource will
+            # be automatically created in VCF Ops if it didn't already exist.
+            quote = result.object(ADAPTER_KIND, "Quote", ticker)
+            bid = Metric("bid", q["bid"])
+            ask = Metric("ask", q["ask"])
+
+            # Add the bid and ask price to the resource.
+            quote.add_metric(bid)
+            quote.add_metric(ask)
         except Exception as e:
             logger.error("Unexpected collection error")
             logger.exception(e)
@@ -123,9 +157,6 @@ def get_endpoints(adapter_instance: AdapterInstance) -> EndpointResult:
         # AdapterInstance object that is passed to the 'test' and 'collect' methods.
         # Any certificate that is encountered in those methods should then be validated
         # against the certificate(s) in the AdapterInstance.
-
-        # TODO: Add any additional endpoints if any
-
         logger.debug(f"Returning endpoints: {result.get_json()}")
         return result
 
